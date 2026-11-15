@@ -59,7 +59,12 @@ const KEEP = [
 ];
 
 async function main() {
+  // Reuse the existing trimmed bank when the original source is unavailable.
   if (!fs.existsSync(SRC)) {
+    if (fs.existsSync(OUT)) {
+      console.log('原始音源不存在，使用已有音源：public/soundfont.sf3');
+      return;
+    }
     console.error(`找不到音源：${SRC}\n用 CM_BANK_SRC=... 指定路径。`);
     process.exit(1);
   }

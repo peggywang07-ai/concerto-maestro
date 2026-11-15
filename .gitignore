@@ -17,3 +17,6 @@ ConcertoMaestro-standalone.zip
 
 # 离线包的解压副本，不是仓库内容
 /ConcertoMaestro/
+
+# Allow the trimmed web soundbank to be deployed with Page
+!public/soundfont.sf3
