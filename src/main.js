@@ -68,6 +68,15 @@ async function bootEngine() {
   player = new Player();
   window.__cm = { player, state }; // debugging handle: console access to the engine
 
+  player.onPrepareProgress = (f) => {
+    if (f >= 1) setEngine('ready', 'engine.ready');
+    else setEngine('loading', 'engine.prepare');
+  };
+
+  player.onPrepareError = () => {
+    setEngine('error', 'engine.error');
+  };
+
   if (isSafari() && location.protocol === 'file:') {
     setEngine('error', 'engine.safari');
     const hint = $('#safariHint');
@@ -195,10 +204,6 @@ async function selectPiece(id) {
   if (player?.ready) {
     // the soundbank decodes samples lazily on the audio thread; force that to
     // happen before the first note instead of during it
-    player.onPrepareProgress = (f) => {
-      if (f >= 1) setEngine('ready', 'engine.ready');
-      else setEngine('loading', 'engine.prepare');
-    };
     player.setPiece(piece);
   } else if (player) {
     player.piece = piece;
@@ -594,7 +599,7 @@ $('#playBtn').onclick = async () => {
     setEngine('error', 'engine.blocked');
     return;
   }
-  if (player.playing) {
+  if (player.playing || player._pendingStart) {
     player.pause();
   } else {
     if (player.currentBeat() >= state.current.totalBeats - 0.05) player.seekBar(1);

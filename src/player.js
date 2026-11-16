@@ -107,6 +107,9 @@ export class Player {
     this._anchorBeat = 0;
     this._timer = null;
     this._onTick = null;
+    this._prepareGeneration = 0;
+    this._pendingStart = false;
+    this._preparePromise = null;
   }
 
   async init(onStatus) {
@@ -159,6 +162,8 @@ export class Player {
 
   /** Build the flat event list + program the channels for a new piece. */
   setPiece(piece) {
+    const generation = ++this._prepareGeneration;
+    this._pendingStart = false;
     this.stop();
     this.piece = piece;
     this.tmap = new TempoMap(piece);
@@ -175,7 +180,23 @@ export class Player {
     this.loop = null;
     this._program();
     this._prepared = false;
-    this._preparePromise = this.prepare((f) => this.onPrepareProgress?.(f));
+    this._prepareError = null;
+
+    this._preparePromise = this.prepare(
+      (f) => this.onPrepareProgress?.(f),
+      generation
+    ).then(
+      () => true,
+      (error) => {
+        if (generation !== this._prepareGeneration) return false;
+
+        this._prepareError = error;
+        console.error("Sound preparation failed:", error);
+        this.onPrepareError?.(error);
+
+        return false;
+      }
+    );
   }
 
   /**
@@ -195,13 +216,14 @@ export class Player {
    * Velocities are picked to land in each velocity layer, since different
    * layers reference different samples.
    */
-  async prepare(onProgress) {
+  async prepare(onProgress, generation = this._prepareGeneration) {
     const synth = this.synth;
     const piece = this.piece;
-    if (!synth || !piece) return;
+    const events = this.events;
+    if (!synth || !piece || generation !== this._prepareGeneration) return;
     const chans = [...new Set(piece.tracks.map((t) => t.channel))];
     const range = new Map();
-    for (const e of this.events) {
+    for (const e of events) {
       const r = range.get(e.ch);
       if (!r) range.set(e.ch, [e.midi, e.midi]);
       else {
@@ -218,11 +240,13 @@ export class Player {
     }
     for (const ch of chans) synth.controllerChange(ch, 7, 0); // inaudible
     for (const ch of chans) {
+      if (generation !== this._prepareGeneration) return;
       const r = range.get(ch);
       if (!r) continue;
       const lo = Math.max(0, r[0] - 2);
       const hi = Math.min(127, r[1] + 2);
       for (let key = lo; key <= hi; key++) {
+        if (generation !== this._prepareGeneration) return;
         for (const v of VELS) {
           synth.noteOn(ch, key, v);
           synth.noteOff(ch, key);
@@ -231,9 +255,11 @@ export class Player {
         if (key % 8 === 7) {
           onProgress?.(done / Math.max(1, total));
           await new Promise((r2) => setTimeout(r2, 0));
+          if (generation !== this._prepareGeneration) return;
         }
       }
     }
+    if (generation !== this._prepareGeneration) return;
     synth.stopAll(true);
     // Barrier. The warm-up notes only *queue* the decode work; awaiting a
     // snapshot forces the worklet to have processed every message before it,
@@ -244,6 +270,7 @@ export class Player {
     } catch {
       /* older builds may not answer; fall through and play anyway */
     }
+    if (generation !== this._prepareGeneration) return;
     this.applyMix(); // restore channel volumes
     this._prepared = true;
     onProgress?.(1);
@@ -373,18 +400,33 @@ export class Player {
   }
 
   play() {
-    if (!this.ready || !this.events.length) return;
+    if (!this.ready || !this.events.length || this.playing || this._pendingStart) return;
+
     this.resume();
+
     if (!this._prepared && this._preparePromise) {
-      // finish decoding first; the first note must not race the audio thread
-      this._preparePromise.then(() => this._startPlayback());
+      const generation = this._prepareGeneration;
+      this._pendingStart = true;
+
+      this._preparePromise.then((prepared) => {
+        if (generation !== this._prepareGeneration || !this._pendingStart) return;
+
+        this._pendingStart = false;
+
+        if (prepared) {
+          this._startPlayback();
+        }
+      });
+
       return;
     }
+
     this._startPlayback();
   }
 
   _startPlayback() {
-    if (!this.ready || !this.events.length) return;
+    if (!this.ready || !this.events.length || this.playing) return;
+    if (this._timer) clearInterval(this._timer);
     const beat = this._anchorBeat;
     this._anchorCtx = this.ctx.currentTime + 0.06;
     this.cursor = this._indexAtBeat(beat);
@@ -395,6 +437,7 @@ export class Player {
 
   pause() {
     const beat = this.currentBeat(); // must read while still "playing"
+    this._pendingStart = false;
     this.playing = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
@@ -403,6 +446,7 @@ export class Player {
   }
 
   stop() {
+    this._pendingStart = false;
     this.playing = false;
     if (this._timer) clearInterval(this._timer);
     this._timer = null;
